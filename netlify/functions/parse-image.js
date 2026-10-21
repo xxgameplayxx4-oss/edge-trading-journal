@@ -79,7 +79,7 @@ async function postJSON(url, headers, payload, label) {
 // Gemini is constrained by a response schema, so the reply is already the shape
 // we want — no scraping a JSON object out of prose.
 async function readWithGemini(apiKey, base64, mediaType) {
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
+  const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash'
   const data = await postJSON(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     { 'x-goog-api-key': apiKey },
