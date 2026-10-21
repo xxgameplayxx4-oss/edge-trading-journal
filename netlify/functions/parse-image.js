@@ -3,27 +3,46 @@
 // than anything the client could read, so every call is bounded here instead.
 const CALL_TIMEOUT_MS = 8500
 
+// The two screenshots are halves of one trade, and each has a number on it that
+// looks like the answer but is not: the chart's header is the instrument's own
+// daily change, and its order panel holds a default size, not the size traded.
 const PROMPT =
-  'Extract trade data from this image (P&L card or TradingView chart screenshot). ' +
-  'These cards often show a loss in red with no minus sign: if the P&L is red, or if the direction and prices ' +
-  'imply a loss (Long with exitPrice below entryPrice, Short with exitPrice above entryPrice), return pnl as a ' +
-  'NEGATIVE number. Copy prices digit for digit. Use null for anything not visible in the image.'
+  'Read this trading screenshot. It is one of two kinds and you must say which in the "kind" field.\n\n' +
+  'kind "card" — a broker P&L card for a trade that has closed. Read symbol, direction, quantity, the entry ' +
+  'and exit fill prices, the P&L and the open and close times. These cards mark a loss with red text and no ' +
+  'minus sign, so if the P&L is red, or the direction and prices imply a loss (Long with exitPrice below ' +
+  'entryPrice, Short with exitPrice above entryPrice), return pnl as a NEGATIVE number.\n\n' +
+  'kind "chart" — a TradingView chart with a position tool drawn on it. The grey price tag on the right axis ' +
+  'is the ENTRY. One shaded box is green and one is red or pink: the green box is the profit target and the ' +
+  'red box is the stop. Read takeProfit and stopLoss from the far edge of each box, the edge further from the ' +
+  'entry. A target above the entry means Long, a target below it means Short. Also read the timeframe (1m, 5m) ' +
+  'and the date printed on the time axis.\n\n' +
+  'Two things on a chart are not what they look like. The large number under the instrument name is that ' +
+  'instrument\'s last price and its change on the day, NOT this trade\'s result — on a chart, leave pnl null. ' +
+  'The Buy/Sell panel at the bottom shows a default order size, NOT the size that was traded — on a chart, ' +
+  'leave qty null.\n\n' +
+  'Copy every price digit for digit. Use null for anything the image does not show.'
 
+// Only kind and symbol are required. A chart has no fill, no size and no result,
+// so demanding those is an invitation to invent them.
 const SCHEMA = {
   type: 'object',
   properties: {
+    kind: { type: 'string', enum: ['card', 'chart'] },
     symbol: { type: 'string' },
-    type: { type: 'string' },
-    qty: { type: 'number' },
-    entryPrice: { type: 'number' },
-    exitPrice: { type: 'number' },
-    pnl: { type: 'number' },
+    type: { type: 'string', nullable: true },
+    qty: { type: 'number', nullable: true },
+    entryPrice: { type: 'number', nullable: true },
+    exitPrice: { type: 'number', nullable: true },
+    pnl: { type: 'number', nullable: true },
     openTime: { type: 'string', nullable: true },
     closeTime: { type: 'string', nullable: true },
     stopLoss: { type: 'number', nullable: true },
-    takeProfit: { type: 'number', nullable: true }
+    takeProfit: { type: 'number', nullable: true },
+    timeframe: { type: 'string', nullable: true },
+    tradeDate: { type: 'string', nullable: true }
   },
-  required: ['symbol', 'type', 'qty', 'entryPrice', 'exitPrice', 'pnl']
+  required: ['kind', 'symbol']
 }
 
 const json = (body, status = 200) =>
@@ -89,7 +108,7 @@ async function readWithNvidia(apiKey, base64, mediaType) {
         {
           role: 'user',
           content: [
-            { type: 'text', text: `${PROMPT} Return ONLY valid JSON with keys: symbol, type, qty, entryPrice, exitPrice, pnl, openTime, closeTime, stopLoss, takeProfit.` },
+            { type: 'text', text: `${PROMPT}\n\nReturn ONLY valid JSON with keys: kind, symbol, type, qty, entryPrice, exitPrice, pnl, openTime, closeTime, stopLoss, takeProfit, timeframe, tradeDate.` },
             { type: 'image_url', image_url: { url: `data:${mediaType};base64,${base64}` } }
           ]
         }

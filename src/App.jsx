@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import DockerOffice from './components/DockerOffice'
 
 const API_URL = '/api/journal'
@@ -116,6 +116,80 @@ function signedPnl(raw, side, entry, exit) {
   return profitable ? magnitude : -magnitude
 }
 
+// A chart screenshot and a P&L card are two halves of one trade: the chart holds
+// the plan (entry, stop, target), the card holds what actually filled. The model
+// labels which it read, but the shape of the data decides when it does not.
+const isChartPlan = (raw) =>
+  String(raw.kind || '').toLowerCase() === 'chart' ||
+  (toNum(raw.pnl) === null && (toNum(raw.stopLoss) !== null || toNum(raw.takeProfit) !== null))
+
+// TradingView writes CME:MNQ, the broker writes MNQZ5 — compare the root only.
+const rootSymbol = (s) => String(s || '').toUpperCase().split(':').pop().replace(/[^A-Z]/g, '').slice(0, 3)
+
+const sideOf = (s) => (/short|sell/i.test(s || '') ? 'Short' : /long|buy/i.test(s || '') ? 'Long' : '')
+
+function planMatches(trade, plan) {
+  if (rootSymbol(trade.symbol) !== rootSymbol(plan.symbol)) return false
+  const a = toNum(trade.buyPrice ?? trade.entryPrice)
+  const b = toNum(plan.buyPrice)
+  if (a === null || b === null) return false
+  const sa = sideOf(trade.side)
+  if (sa && plan.side && sa !== plan.side) return false
+  // The fill rarely lands exactly on a level drawn beforehand, so compare loosely.
+  return Math.abs(a - b) <= Math.max(Math.abs(b) * 0.0005, 1)
+}
+
+// The card is the record of what happened, so it wins every field it has. The
+// chart only supplies what it alone witnessed: where the stop and target were.
+const mergePlan = (trade, plan) => ({
+  ...trade,
+  side: trade.side || plan.side,
+  stopLoss: trade.stopLoss ?? plan.stopLoss,
+  takeProfit: trade.takeProfit ?? plan.takeProfit,
+  timeframe: trade.timeframe || plan.timeframe,
+  tradeDate: trade.tradeDate || plan.tradeDate,
+  chartSource: plan.source
+})
+
+const price = (v) => (toNum(v) === null ? '-' : toNum(v).toLocaleString())
+
+function normalizeChartPlan(raw, filename) {
+  const entry = toNum(raw.entryPrice ?? raw.buyPrice)
+  const tp = toNum(raw.takeProfit)
+  // The tool's own geometry names the direction when the model did not: the
+  // target box sits above the entry on a long, below it on a short.
+  const side = sideOf(raw.direction || raw.type || raw.side) ||
+    (tp !== null && entry !== null ? (tp > entry ? 'Long' : 'Short') : '')
+  return {
+    symbol: raw.symbol || raw.contract || '—',
+    side,
+    buyPrice: entry,
+    sellPrice: null,
+    stopLoss: toNum(raw.stopLoss),
+    takeProfit: tp,
+    timeframe: raw.timeframe || '',
+    tradeDate: raw.tradeDate || '',
+    source: filename || 'chart'
+  }
+}
+
+// R is measured in points, which needs no contract multiplier: the move the
+// trade actually made over the move it was risking to make it.
+function riskMetrics(t) {
+  const entry = toNum(t.buyPrice ?? t.entryPrice)
+  const exit = toNum(t.sellPrice ?? t.exitPrice)
+  const sl = toNum(t.stopLoss)
+  const tp = toNum(t.takeProfit)
+  const risk = entry !== null && sl !== null ? Math.abs(entry - sl) : null
+  return {
+    risk,
+    rMultiple: risk && exit !== null && exit !== 0
+      ? (formatPnL(t.pnl) >= 0 ? 1 : -1) * Math.abs(exit - entry) / risk
+      : null,
+    plannedRR: risk && tp !== null ? Math.abs(tp - entry) / risk : null
+  }
+}
+
 function normalizeExtractedTrade(raw, filename) {
   const side = raw.type || raw.side || ''
   const entry = toNum(raw.entryPrice ?? raw.buyPrice)
@@ -172,12 +246,20 @@ function Toast({ message, type, onClose }) {
 export default function App() {
   const [trades, setTrades] = useState([])
   const [uploads, setUploads] = useState([])
+  const [plans, setPlans] = useState([])
   const [activeTab, setActiveTab] = useState('journal')
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [toast, setToast] = useState(null)
   const [dragActive, setDragActive] = useState(false)
   const [isParsing, setIsParsing] = useState(false)
+
+  // An import decides who it pairs with before it touches state. StrictMode
+  // runs an updater twice, so that lookup cannot live inside one.
+  const tradesRef = useRef(trades)
+  const plansRef = useRef(plans)
+  useEffect(() => { tradesRef.current = trades }, [trades])
+  useEffect(() => { plansRef.current = plans }, [plans])
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type })
@@ -190,6 +272,7 @@ export default function App() {
       const data = await res.json()
       setTrades(data.trades || [])
       setUploads(data.uploads || [])
+      setPlans(data.plans || [])
     } catch (e) {
       console.error('Load failed:', e)
       showToast('Failed to load data', 'error')
@@ -204,7 +287,7 @@ export default function App() {
       await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trades, uploads })
+        body: JSON.stringify({ trades, uploads, plans })
       })
       showToast('Data saved to cloud')
     } catch (e) {
@@ -248,10 +331,29 @@ export default function App() {
         if (!res.ok || !payload || payload.error) {
           throw new Error(payload?.error || `the parser returned ${res.status}`)
         }
-        const trade = normalizeExtractedTrade(payload, file.name)
         setUploads(prev => [{ filename: file.name, date: new Date().toISOString(), count: 1 }, ...prev].slice(0, 50))
-        setTrades(prev => [trade, ...prev])
-        showToast(`Extracted ${trade.symbol} from ${file.name}`)
+
+        if (isChartPlan(payload)) {
+          const plan = normalizeChartPlan(payload, file.name)
+          const idx = tradesRef.current.findIndex(t => planMatches(t, plan))
+          if (idx === -1) {
+            setPlans(prev => [plan, ...prev].slice(0, 50))
+            showToast(`Saved the ${plan.symbol} setup — waiting on its P&L card`)
+          } else {
+            setTrades(prev => prev.map((t, i) => (i === idx ? mergePlan(t, plan) : t)))
+            showToast(`Added SL/TP to ${plan.symbol} from ${file.name}`)
+          }
+          return
+        }
+
+        const trade = normalizeExtractedTrade(payload, file.name)
+        const planIdx = plansRef.current.findIndex(p => planMatches(trade, p))
+        const row = planIdx === -1 ? trade : mergePlan(trade, plansRef.current[planIdx])
+        if (planIdx !== -1) setPlans(prev => prev.filter((_, i) => i !== planIdx))
+        setTrades(prev => [row, ...prev])
+        showToast(planIdx === -1
+          ? `Extracted ${row.symbol} from ${file.name}`
+          : `Paired ${row.symbol} with its chart`)
       } catch (err) {
         console.error('Image import failed:', err)
         showToast(`Couldn't read that screenshot — ${err.message}`, 'error')
@@ -337,6 +439,41 @@ export default function App() {
             </label>
           </div>
 
+          {plans.length > 0 && (
+            <div className="card" style={{ marginTop: 24 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <strong>Chart setups waiting on a P&L card</strong>
+                <span style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>{plans.length} pending</span>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP</th><th>Planned</th><th>TF</th><th>Date</th><th>From</th><th></th></tr>
+                  </thead>
+                  <tbody>
+                    {plans.map((p, i) => {
+                      const { plannedRR } = riskMetrics(p)
+                      return (
+                        <tr key={i}>
+                          <td className="mono">{p.symbol}</td>
+                          <td className="mono">{p.side || '-'}</td>
+                          <td className="mono">{price(p.buyPrice)}</td>
+                          <td className="mono">{price(p.stopLoss)}</td>
+                          <td className="mono">{price(p.takeProfit)}</td>
+                          <td className="mono">{plannedRR === null ? '-' : `${plannedRR.toFixed(2)}R`}</td>
+                          <td className="mono">{p.timeframe || '-'}</td>
+                          <td className="mono">{p.tradeDate || '-'}</td>
+                          <td className="mono" style={{ color: 'var(--muted)' }}>{p.source}</td>
+                          <td><button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '0.75rem' }} onClick={() => setPlans(prev => prev.filter((_, n) => n !== i))}>Discard</button></td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           <div className="card" style={{ marginTop: 24 }}>
             {trades.length === 0 ? (
               <div className="empty">No trades yet. Upload a CSV to get started.</div>
@@ -345,27 +482,33 @@ export default function App() {
                 <table>
                   <thead>
                     <tr>
-                      <th>#</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>SL</th><th>TP</th><th>P&L</th><th>Date</th><th>Duration</th><th></th>
+                      <th>#</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>SL</th><th>TP</th><th>R</th><th>P&L</th><th>Date</th><th>Duration</th><th></th>
                     </tr>
                   </thead>
                   <tbody>
-                    {trades.map((t, i) => (
-                      <tr key={i}>
-                        <td className="mono">{i + 1}</td>
-                        <td className="mono">{t.symbol}</td>
-                        <td className="mono">{t.qty}</td>
-                        <td className="mono">{parseFloat(t.buyPrice || t.entryPrice || 0).toLocaleString()}</td>
-                        <td className="mono">{parseFloat(t.sellPrice || t.exitPrice || 0).toLocaleString()}</td>
-                        <td className="mono">{t.stopLoss || '-'}</td>
-                        <td className="mono">{t.takeProfit || '-'}</td>
-                        <td className={`mono ${formatPnL(t.pnl) >= 0 ? 'pnl-green' : 'pnl-red'}`}>
-                          {formatPnL(t.pnl) >= 0 ? '+' : ''}{formatPnL(t.pnl).toFixed(2)}
-                        </td>
-                        <td className="mono">{t.boughtTimestamp?.split(' ')[0] || ''}</td>
-                        <td className="mono">{t.duration}</td>
-                        <td><button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '0.75rem' }} onClick={() => deleteTrade(i)}>Delete</button></td>
-                      </tr>
-                    ))}
+                    {trades.map((t, i) => {
+                      const { rMultiple } = riskMetrics(t)
+                      return (
+                        <tr key={i}>
+                          <td className="mono">{i + 1}</td>
+                          <td className="mono">{t.symbol}</td>
+                          <td className="mono">{t.qty}</td>
+                          <td className="mono">{parseFloat(t.buyPrice || t.entryPrice || 0).toLocaleString()}</td>
+                          <td className="mono">{parseFloat(t.sellPrice || t.exitPrice || 0).toLocaleString()}</td>
+                          <td className="mono">{price(t.stopLoss)}</td>
+                          <td className="mono">{price(t.takeProfit)}</td>
+                          <td className={`mono ${rMultiple === null ? '' : rMultiple >= 0 ? 'pnl-green' : 'pnl-red'}`}>
+                            {rMultiple === null ? '-' : `${rMultiple >= 0 ? '+' : ''}${rMultiple.toFixed(2)}R`}
+                          </td>
+                          <td className={`mono ${formatPnL(t.pnl) >= 0 ? 'pnl-green' : 'pnl-red'}`}>
+                            {formatPnL(t.pnl) >= 0 ? '+' : ''}{formatPnL(t.pnl).toFixed(2)}
+                          </td>
+                          <td className="mono">{t.boughtTimestamp?.split(' ')[0] || ''}</td>
+                          <td className="mono">{t.duration}</td>
+                          <td><button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '0.75rem' }} onClick={() => deleteTrade(i)}>Delete</button></td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
