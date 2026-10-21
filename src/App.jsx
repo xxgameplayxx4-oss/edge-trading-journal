@@ -58,6 +58,7 @@ export default function App() {
   const [isSaving, setIsSaving] = useState(false)
   const [toast, setToast] = useState(null)
   const [dragActive, setDragActive] = useState(false)
+  const [isParsing, setIsParsing] = useState(false)
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type })
@@ -104,8 +105,31 @@ export default function App() {
     }
   }, [trades, uploads, saveData])
 
-  const handleFile = (file) => {
-    if (!file.name.endsWith('.csv')) { showToast('Please upload a CSV file', 'error'); return }
+  const handleFile = async (file) => {
+    if (file.type.startsWith('image/')) {
+      setIsParsing(true)
+      const reader = new FileReader()
+      reader.onload = async (e) => {
+        const base64 = e.target.result.split(',')[1]
+        try {
+          const res = await fetch('/api/parse-image', {
+            method: 'POST',
+            body: JSON.stringify({ imageBase64: base64 })
+          })
+          const tradeData = await res.json()
+          setTrades(prev => [tradeData, ...prev])
+          showToast('Trade extracted successfully')
+        } catch (e) {
+          showToast('Failed to parse image', 'error')
+        } finally {
+          setIsParsing(false)
+        }
+      }
+      reader.readAsDataURL(file)
+      return
+    }
+
+    if (!file.name.endsWith('.csv')) { showToast('Please upload a CSV or image file', 'error'); return }
     const reader = new FileReader()
     reader.onload = (e) => {
       const newTrades = parseCSV(e.target.result)
@@ -166,11 +190,11 @@ export default function App() {
       {activeTab === 'journal' && (
         <>
           <div className={`card upload-area ${dragActive ? 'drag' : ''}`} onDrop={handleDrop} onDragOver={handleDragOver} onDragLeave={handleDragLeave}>
-            <input type="file" accept=".csv" onChange={handleFileSelect} id="fileInput" />
+            <input type="file" accept=".csv,image/*" onChange={handleFileSelect} id="fileInput" />
             <label htmlFor="fileInput" style={{ cursor: 'pointer' }}>
               <div style={{ fontSize: '2rem', marginBottom: 8 }}>📁</div>
-              <div>Drag & drop Tradovate CSV here, or click to browse</div>
-              <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: 8 }}>Supports performance CSV export from Tradovate</div>
+              <div>Drag & drop CSV or Trade Screenshots (P&L / Chart) here</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: 8 }}>Supports Tradovate CSV & chart images with auto SL/TP extraction</div>
             </label>
           </div>
 
@@ -182,7 +206,7 @@ export default function App() {
                 <table>
                   <thead>
                     <tr>
-                      <th>#</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Date</th><th>Duration</th><th></th>
+                      <th>#</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>SL</th><th>TP</th><th>P&L</th><th>Date</th><th>Duration</th><th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -191,8 +215,10 @@ export default function App() {
                         <td className="mono">{i + 1}</td>
                         <td className="mono">{t.symbol}</td>
                         <td className="mono">{t.qty}</td>
-                        <td className="mono">{parseFloat(t.buyPrice).toLocaleString()}</td>
-                        <td className="mono">{parseFloat(t.sellPrice).toLocaleString()}</td>
+                        <td className="mono">{parseFloat(t.buyPrice || t.entryPrice || 0).toLocaleString()}</td>
+                        <td className="mono">{parseFloat(t.sellPrice || t.exitPrice || 0).toLocaleString()}</td>
+                        <td className="mono">{t.stopLoss || '-'}</td>
+                        <td className="mono">{t.takeProfit || '-'}</td>
                         <td className={`mono ${formatPnL(t.pnl) >= 0 ? 'pnl-green' : 'pnl-red'}`}>
                           {formatPnL(t.pnl) >= 0 ? '+' : ''}{formatPnL(t.pnl).toFixed(2)}
                         </td>
@@ -315,6 +341,7 @@ export default function App() {
       )}
 
       {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+      {isParsing && <div style={{ position: 'fixed', bottom: 24, left: 24, background: 'var(--card)', border: '1px solid var(--accent)', padding: '12px 20px', borderRadius: 8, zIndex: 100 }}>🤖 Analyzing screenshot & extracting SL/TP...</div>}
       {isSaving && <div style={{ position: 'fixed', bottom: 24, left: 24, fontSize: '0.75rem', color: 'var(--muted)' }}>Saving…</div>}
     </div>
   )
