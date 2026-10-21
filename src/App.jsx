@@ -38,6 +38,22 @@ const toNum = (v) => {
 // screenshot enough to stay under the serverless payload limit.
 const MAX_IMAGE_DIM = 1600
 
+function backdropFor(ctx, canvas) {
+  try {
+    const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+    let lum = 0, opaque = 0, clear = 0
+    // Every 40th pixel is plenty to tell a dark card from a light one.
+    for (let i = 0; i < d.length; i += 160) {
+      if (d[i + 3] > 250) { lum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]; opaque++ }
+      else clear++
+    }
+    if (!clear || !opaque) return '#ffffff'
+    return lum / opaque < 110 ? '#0b0b0e' : '#ffffff'
+  } catch {
+    return '#ffffff'
+  }
+}
+
 function fileToJpegBase64(file) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file)
@@ -49,10 +65,13 @@ function fileToJpegBase64(file) {
       canvas.width = Math.max(1, Math.round(img.naturalWidth * scale))
       canvas.height = Math.max(1, Math.round(img.naturalHeight * scale))
       const ctx = canvas.getContext('2d')
-      // Screenshots often carry transparency, which JPEG would flatten to black.
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, canvas.width, canvas.height)
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      // JPEG has no alpha, so anything transparent needs a backdrop painted under
+      // it. Match it to the card: a dark P&L card keeps its light text readable.
+      ctx.globalCompositeOperation = 'destination-over'
+      ctx.fillStyle = backdropFor(ctx, canvas)
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.globalCompositeOperation = 'source-over'
       resolve(canvas.toDataURL('image/jpeg', 0.9).split(',')[1])
     }
     img.onerror = () => {
@@ -65,19 +84,56 @@ function fileToJpegBase64(file) {
 
 // The model answers with its own field names; reshape the row so the table,
 // the stats and the equity curve all read it exactly like a CSV import.
+const clockToSeconds = (v) => {
+  const m = String(v ?? '').match(/(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)?/i)
+  if (!m) return null
+  let h = +m[1]
+  const ampm = m[4] && m[4].toUpperCase()
+  if (ampm === 'PM' && h !== 12) h += 12
+  if (ampm === 'AM' && h === 12) h = 0
+  return h * 3600 + +m[2] * 60 + +m[3]
+}
+
+const holdTime = (open, close) => {
+  const a = clockToSeconds(open)
+  const b = clockToSeconds(close)
+  if (a === null || b === null) return ''
+  const secs = b >= a ? b - a : b + 86400 - a
+  const h = Math.floor(secs / 3600)
+  const min = Math.floor((secs % 3600) / 60)
+  const s = secs % 60
+  return [h && `${h}hr`, (h || min) && `${min}min`, `${s}sec`].filter(Boolean).join(' ')
+}
+
+// A P&L card marks a loss with red text and no minus sign, so the number on its
+// own is ambiguous — a vision model reads digits, not colour. Direction and the
+// two prices are not ambiguous, so they decide the sign whenever both are there.
+function signedPnl(raw, side, entry, exit) {
+  const magnitude = Math.abs(toNum(raw.pnl) ?? 0)
+  const direction = /short|sell/i.test(side) ? -1 : /long|buy/i.test(side) ? 1 : 0
+  if (!direction || entry === null || exit === null || entry === exit) return toNum(raw.pnl) ?? 0
+  const profitable = direction === 1 ? exit > entry : exit < entry
+  return profitable ? magnitude : -magnitude
+}
+
 function normalizeExtractedTrade(raw, filename) {
+  const side = raw.type || raw.side || ''
+  const entry = toNum(raw.entryPrice ?? raw.buyPrice)
+  const exit = toNum(raw.exitPrice ?? raw.sellPrice)
+  const open = raw.openTime || raw.boughtTimestamp || ''
+  const close = raw.closeTime || raw.soldTimestamp || ''
   return {
     symbol: raw.symbol || raw.contract || '—',
-    side: raw.type || raw.side || '',
+    side,
     qty: toNum(raw.qty) ?? 1,
-    buyPrice: toNum(raw.entryPrice ?? raw.buyPrice) ?? 0,
-    sellPrice: toNum(raw.exitPrice ?? raw.sellPrice) ?? 0,
+    buyPrice: entry ?? 0,
+    sellPrice: exit ?? 0,
     stopLoss: toNum(raw.stopLoss),
     takeProfit: toNum(raw.takeProfit),
-    pnl: toNum(raw.pnl) ?? 0,
-    boughtTimestamp: raw.openTime || raw.boughtTimestamp || new Date().toLocaleString(),
-    soldTimestamp: raw.closeTime || raw.soldTimestamp || '',
-    duration: raw.duration || '',
+    pnl: signedPnl(raw, side, entry, exit),
+    boughtTimestamp: open || new Date().toLocaleString(),
+    soldTimestamp: close,
+    duration: raw.duration || holdTime(open, close),
     source: filename || 'screenshot'
   }
 }
@@ -178,6 +234,11 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ imageBase64, mediaType: 'image/jpeg' })
         })
+        // A missing function falls through to the SPA redirect, which answers with
+        // index.html — a non-JSON reply means the endpoint isn't deployed at all.
+        if (!(res.headers.get('content-type') || '').includes('application/json')) {
+          throw new Error(`/api/parse-image did not respond (HTTP ${res.status}). Is the Netlify function deployed?`)
+        }
         const payload = await res.json().catch(() => null)
         // Without this check an error body lands in the table as a trade row.
         if (!res.ok || !payload || payload.error) {

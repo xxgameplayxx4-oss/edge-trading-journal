@@ -46,7 +46,7 @@ export default async (request) => {
             content: [
               {
                 type: 'text',
-                text: 'Extract trade data from this image (P&L card or TradingView chart screenshot) as strict JSON with keys: symbol (e.g. MNQ, MES), type (Long/Short), qty (number), entryPrice (number), exitPrice (number), pnl (number), openTime, closeTime, stopLoss (number or null if not found), takeProfit (number or null if not found). Return ONLY valid JSON.'
+                text: 'Extract trade data from this image (P&L card or TradingView chart screenshot) as strict JSON with keys: symbol (e.g. MNQ, MES), type (Long/Short), qty (number), entryPrice (number), exitPrice (number), pnl (number), openTime, closeTime, stopLoss (number or null if not found), takeProfit (number or null if not found). These cards often show a loss in red with no minus sign: if the P&L is red, or if the direction and prices imply a loss (Long with exitPrice below entryPrice, Short with exitPrice above entryPrice), return pnl as a NEGATIVE number. Copy prices digit for digit. Return ONLY valid JSON.'
               },
               {
                 type: 'image_url',
