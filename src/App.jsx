@@ -234,10 +234,14 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ imageBase64, mediaType: 'image/jpeg' })
         })
-        // A missing function falls through to the SPA redirect, which answers with
-        // index.html — a non-JSON reply means the endpoint isn't deployed at all.
+        // Anything other than JSON means the request never reached the handler:
+        // a gateway timeout, or the SPA redirect answering with index.html.
         if (!(res.headers.get('content-type') || '').includes('application/json')) {
-          throw new Error(`/api/parse-image did not respond (HTTP ${res.status}). Is the Netlify function deployed?`)
+          throw new Error(
+            res.status === 504 || res.status === 502
+              ? `the vision API timed out at the gateway (HTTP ${res.status})`
+              : `/api/parse-image did not respond (HTTP ${res.status}). Is the Netlify function deployed?`
+          )
         }
         const payload = await res.json().catch(() => null)
         // Without this check an error body lands in the table as a trade row.
