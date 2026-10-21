@@ -44,3 +44,14 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .toast.success { border-color: var(--green); }
 .toast.error { border-color: var(--red); }
 @keyframes slideIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+/* Agent office — the sprite's position is driven by an inline transform, so the
+   walk cycle animates margins instead of fighting it for the transform property. */
+.agent { position: absolute; }
+.agent-body { position: absolute; inset: 0; transform-origin: 50% 50%; }
+.agent.walking { animation: agentBob 0.4s ease-in-out infinite; }
+.agent-legs span { display: inline-block; width: 6px; height: 6px; margin: 0 2px; border-radius: 50%; background: #a1a1aa; }
+.agent.walking .agent-legs span { animation: agentStep 0.4s ease-in-out infinite; }
+.agent.walking .agent-legs span:nth-child(2) { animation-delay: 0.13s; }
+.agent.walking .agent-legs span:nth-child(3) { animation-delay: 0.26s; }
+@keyframes agentBob { 0%, 100% { margin-top: 0; } 50% { margin-top: -3px; } }
+@keyframes agentStep { 0%, 100% { opacity: 0.45; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }

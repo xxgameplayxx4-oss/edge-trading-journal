@@ -15,9 +15,71 @@ function parseCSV(text) {
 }
 
 function formatPnL(pnl) {
-  const num = parseFloat(pnl.replace(/[$,()]/g, '').replace('-', ''))
-  const isNegative = pnl.includes('(') || pnl.startsWith('-')
+  if (typeof pnl === 'number') return Number.isFinite(pnl) ? pnl : 0
+  if (pnl === null || pnl === undefined) return 0
+  const raw = String(pnl).trim()
+  if (!raw) return 0
+  // Accounting style: $(45.00) means a loss, same as -45.00
+  const isNegative = raw.includes('(') || raw.startsWith('-')
+  const num = parseFloat(raw.replace(/[^0-9.]/g, ''))
+  if (!Number.isFinite(num)) return 0
   return isNegative ? -num : num
+}
+
+const toNum = (v) => {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (v === null || v === undefined || v === '') return null
+  const n = parseFloat(String(v).replace(/[^0-9.-]/g, ''))
+  return Number.isFinite(n) ? n : null
+}
+
+// The function builds a `data:image/jpeg;base64,` URL for the model, so anything
+// else here is a mime mismatch it rejects. Re-encoding also shrinks a full-size
+// screenshot enough to stay under the serverless payload limit.
+const MAX_IMAGE_DIM = 1600
+
+function fileToJpegBase64(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+      const scale = Math.min(1, MAX_IMAGE_DIM / Math.max(img.naturalWidth, img.naturalHeight))
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(img.naturalWidth * scale))
+      canvas.height = Math.max(1, Math.round(img.naturalHeight * scale))
+      const ctx = canvas.getContext('2d')
+      // Screenshots often carry transparency, which JPEG would flatten to black.
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+      resolve(canvas.toDataURL('image/jpeg', 0.9).split(',')[1])
+    }
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('that file could not be decoded as an image'))
+    }
+    img.src = url
+  })
+}
+
+// The model answers with its own field names; reshape the row so the table,
+// the stats and the equity curve all read it exactly like a CSV import.
+function normalizeExtractedTrade(raw, filename) {
+  return {
+    symbol: raw.symbol || raw.contract || '—',
+    side: raw.type || raw.side || '',
+    qty: toNum(raw.qty) ?? 1,
+    buyPrice: toNum(raw.entryPrice ?? raw.buyPrice) ?? 0,
+    sellPrice: toNum(raw.exitPrice ?? raw.sellPrice) ?? 0,
+    stopLoss: toNum(raw.stopLoss),
+    takeProfit: toNum(raw.takeProfit),
+    pnl: toNum(raw.pnl) ?? 0,
+    boughtTimestamp: raw.openTime || raw.boughtTimestamp || new Date().toLocaleString(),
+    soldTimestamp: raw.closeTime || raw.soldTimestamp || '',
+    duration: raw.duration || '',
+    source: filename || 'screenshot'
+  }
 }
 
 function calculateStats(trades) {
@@ -109,28 +171,32 @@ export default function App() {
   const handleFile = async (file) => {
     if (file.type.startsWith('image/')) {
       setIsParsing(true)
-      const reader = new FileReader()
-      reader.onload = async (e) => {
-        const base64 = e.target.result.split(',')[1]
-        try {
-          const res = await fetch('/api/parse-image', {
-            method: 'POST',
-            body: JSON.stringify({ imageBase64: base64 })
-          })
-          const tradeData = await res.json()
-          setTrades(prev => [tradeData, ...prev])
-          showToast('Trade extracted successfully')
-        } catch (e) {
-          showToast('Failed to parse image', 'error')
-        } finally {
-          setIsParsing(false)
+      try {
+        const imageBase64 = await fileToJpegBase64(file)
+        const res = await fetch('/api/parse-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ imageBase64, mediaType: 'image/jpeg' })
+        })
+        const payload = await res.json().catch(() => null)
+        // Without this check an error body lands in the table as a trade row.
+        if (!res.ok || !payload || payload.error) {
+          throw new Error(payload?.error || `the parser returned ${res.status}`)
         }
+        const trade = normalizeExtractedTrade(payload, file.name)
+        setUploads(prev => [{ filename: file.name, date: new Date().toISOString(), count: 1 }, ...prev].slice(0, 50))
+        setTrades(prev => [trade, ...prev])
+        showToast(`Extracted ${trade.symbol} from ${file.name}`)
+      } catch (err) {
+        console.error('Image import failed:', err)
+        showToast(`Couldn't read that screenshot — ${err.message}`, 'error')
+      } finally {
+        setIsParsing(false)
       }
-      reader.readAsDataURL(file)
       return
     }
 
-    if (!file.name.endsWith('.csv')) { showToast('Please upload a CSV or image file', 'error'); return }
+    if (!/\.csv$/i.test(file.name)) { showToast('Please upload a CSV or image file', 'error'); return }
     const reader = new FileReader()
     reader.onload = (e) => {
       const newTrades = parseCSV(e.target.result)
@@ -287,7 +353,7 @@ export default function App() {
               </div>
 
               <div className="chart-wrap">
-                <svg viewBox="0 0 100% 300" preserveAspectRatio="none" style={{ width: '100%', height: '100%' }}>
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width: '100%', height: '100%' }}>
                   {equityData.length > 1 && (
                     <>
                       <defs>
