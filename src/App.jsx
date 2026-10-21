@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import DockerOffice from './components/DockerOffice'
 
 const API_URL = '/api/journal'
 
@@ -184,8 +185,15 @@ export default function App() {
       <div className="tab-nav">
         <button className={`tab ${activeTab === 'journal' ? 'active' : ''}`} onClick={() => setActiveTab('journal')}>Journal</button>
         <button className={`tab ${activeTab === 'analytics' ? 'active' : ''}`} onClick={() => setActiveTab('analytics')}>Analytics</button>
+        <button className={`tab ${activeTab === 'office' ? 'active' : ''}`} onClick={() => setActiveTab('office')}>Agent Office</button>
         <button className={`tab ${activeTab === 'uploads' ? 'active' : ''}`} onClick={() => setActiveTab('uploads')}>Uploads</button>
       </div>
+
+      {activeTab === 'office' && (
+        <div className="card" style={{ marginTop: 24 }}>
+          <DockerOffice />
+        </div>
+      )}
 
       {activeTab === 'journal' && (
         <>
