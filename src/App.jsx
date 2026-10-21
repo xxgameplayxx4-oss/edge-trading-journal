@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import DockerOffice from './components/DockerOffice'
+import AgentOffice from './components/AgentOffice'
 
 const API_URL = '/api/journal'
 
@@ -424,7 +424,7 @@ export default function App() {
 
       {activeTab === 'office' && (
         <div className="card" style={{ marginTop: 24 }}>
-          <DockerOffice />
+          <AgentOffice />
         </div>
       )}
 
