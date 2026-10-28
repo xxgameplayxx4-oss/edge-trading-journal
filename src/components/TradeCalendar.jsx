@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { formatPnL, money, signedMoney, tradeDate, dayKey } from '../lib/pnl'
+import { formatPnL, money, signedMoney, tradeDate, dayKey, grossOf, feesOf, hasFeeData } from '../lib/pnl'
 
 // A month of trading, won and lost. This reads trades only — payouts are
 // withdrawals and have their own tab, so nothing here ever sees them.
@@ -56,6 +56,9 @@ export default function TradeCalendar({ trades }) {
   const monthTrades = inMonth.flatMap((d) => d.trades)
   const monthNet = inMonth.reduce((s, d) => s + d.net, 0)
   const monthWins = monthTrades.filter((t) => formatPnL(t.pnl) > 0).length
+  const monthGross = monthTrades.reduce((s, t) => s + grossOf(t), 0)
+  const monthFees = monthTrades.reduce((s, t) => s + feesOf(t), 0)
+  const showGross = hasFeeData(monthTrades)
   const ranked = [...inMonth].sort((a, b) => b.net - a.net)
   const bestDay = ranked[0]
   const worstDay = ranked.length > 1 ? ranked[ranked.length - 1] : null
@@ -86,8 +89,15 @@ export default function TradeCalendar({ trades }) {
       </div>
 
       <div className="stats-grid cal-stats">
+        {showGross && (
+          <div className="stat">
+            <div className="stat-label">Month Gross</div>
+            <div className={`stat-value ${monthGross >= 0 ? 'green' : 'red'}`}>{signedMoney(monthGross)}</div>
+            <div className="cal-stat-note">-{money(monthFees)} in fees</div>
+          </div>
+        )}
         <div className="stat">
-          <div className="stat-label">Month P&amp;L</div>
+          <div className="stat-label">Month {showGross ? 'Net' : 'P&L'}</div>
           <div className={`stat-value ${monthNet >= 0 ? 'green' : 'red'}`}>{signedMoney(monthNet)}</div>
         </div>
         <div className="stat">

@@ -3,7 +3,7 @@ import AgentOffice from './components/AgentOffice'
 import TradeCalendar from './components/TradeCalendar'
 import Spendings from './components/Spendings'
 import EquityCurve from './components/EquityCurve'
-import { formatPnL, money } from './lib/pnl'
+import { formatPnL, money, grossOf, feesOf, hasFeeData } from './lib/pnl'
 import { detectVestFormat, parseVestTrades, parseVestPayouts, payoutTotals, describeVestImport } from './lib/vest'
 
 const API_URL = '/api/journal'
@@ -240,13 +240,20 @@ function calculateStats(trades) {
   const wins = pnls.filter(p => p > 0)
   const losses = pnls.filter(p => p < 0)
   const totalPnL = pnls.reduce((a, b) => a + b, 0)
+  // Gross is what the market gave; net is what survived the fees.
+  const grossPnL = trades.reduce((a, t) => a + grossOf(t), 0)
+  const totalFees = trades.reduce((a, t) => a + feesOf(t), 0)
   const winRate = (wins.length / trades.length * 100).toFixed(1)
   const avgWin = wins.length ? (wins.reduce((a, b) => a + b, 0) / wins.length).toFixed(2) : 0
   const avgLoss = losses.length ? (losses.reduce((a, b) => a + b, 0) / losses.length).toFixed(2) : 0
   const profitFactor = losses.length ? Math.abs(wins.reduce((a, b) => a + b, 0) / losses.reduce((a, b) => a + b, 0)).toFixed(2) : '∞'
   const expectancy = (totalPnL / trades.length).toFixed(2)
   const maxDrawdown = Math.min(...pnls.map((_, i) => pnls.slice(0, i+1).reduce((a, b) => a + b, 0))).toFixed(2)
-  return { totalPnL, winRate, avgWin, avgLoss, profitFactor, expectancy, maxDrawdown, totalTrades: trades.length }
+  return {
+    totalPnL, grossPnL, totalFees, hasFees: hasFeeData(trades),
+    winRate, avgWin, avgLoss, profitFactor, expectancy, maxDrawdown,
+    totalTrades: trades.length,
+  }
 }
 
 function generateEquityCurve(trades) {
@@ -262,6 +269,13 @@ function generateEquityCurve(trades) {
 // this reaches the win rate, the expectancy or the equity curve.
 function Payouts({ rows, onClear }) {
   const t = payoutTotals(rows)
+  // The split is not a constant: these exports carry 95/5 rows alongside 80/20
+  // ones, so a single blended percentage would misdescribe every row it covers.
+  // Only state one rate when every payout actually shares it.
+  const rates = [...new Set(
+    rows.filter((r) => r.requested > 0).map((r) => Math.round((r.trader / r.requested) * 100))
+  )]
+  const uniformSplit = rates.length === 1 ? rates[0] : null
   const tone = (s) =>
     /execut|complete|paid|success/i.test(s) ? 'pnl-green' : /fail|reject|cancel/i.test(s) ? 'pnl-red' : ''
 
@@ -291,6 +305,13 @@ function Payouts({ rows, onClear }) {
         <div className="stat">
           <div className="stat-label">Platform fee</div>
           <div className="stat-value mono red">{money(t.toPlatform)}</div>
+          {t.requested > 0 && (
+            <div className="stat-note">
+              {uniformSplit !== null
+                ? `${uniformSplit} / ${100 - uniformSplit} split`
+                : `${((t.toTrader / t.requested) * 100).toFixed(0)} / ${((t.toPlatform / t.requested) * 100).toFixed(0)} blended, rate varies`}
+            </div>
+          )}
         </div>
       </div>
 
@@ -548,6 +569,9 @@ export default function App() {
   }
 
   const stats = calculateStats(trades)
+  // One flag for the whole table, so its header and body can never disagree
+  // about how many columns there are.
+  const showGross = hasFeeData(trades)
   const equityData = generateEquityCurve([...trades].reverse())
 
   return (
@@ -633,7 +657,9 @@ export default function App() {
                 <table>
                   <thead>
                     <tr>
-                      <th>#</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>SL</th><th>TP</th><th>R</th><th>P&L</th><th>Date</th><th>Duration</th><th></th>
+                      <th>#</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>SL</th><th>TP</th><th>R</th>
+                      {showGross && <><th>Gross</th><th>Fee</th></>}
+                      <th>{showGross ? 'Net' : 'P&L'}</th><th>Date</th><th>Duration</th><th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -651,6 +677,14 @@ export default function App() {
                           <td className={`mono ${rMultiple === null ? '' : rMultiple >= 0 ? 'pnl-green' : 'pnl-red'}`}>
                             {rMultiple === null ? '-' : `${rMultiple >= 0 ? '+' : ''}${rMultiple.toFixed(2)}R`}
                           </td>
+                          {showGross && (
+                            <>
+                              <td className={`mono ${grossOf(t) >= 0 ? 'pnl-green' : 'pnl-red'}`}>
+                                {grossOf(t) >= 0 ? '+' : ''}{grossOf(t).toFixed(2)}
+                              </td>
+                              <td className="mono muted-cell">-{feesOf(t).toFixed(2)}</td>
+                            </>
+                          )}
                           <td className={`mono ${formatPnL(t.pnl) >= 0 ? 'pnl-green' : 'pnl-red'}`}>
                             {formatPnL(t.pnl) >= 0 ? '+' : ''}{formatPnL(t.pnl).toFixed(2)}
                           </td>
@@ -693,11 +727,32 @@ export default function App() {
           {stats ? (
             <>
               <div className="stats-grid">
+                {stats.hasFees && (
+                  <>
+                    <div className="stat">
+                      <div className="stat-label">Gross P&L</div>
+                      <div className={`stat-value mono ${stats.grossPnL >= 0 ? 'green' : 'red'}`}>
+                        {money(stats.grossPnL)}
+                      </div>
+                      <div className="stat-note">before fees</div>
+                    </div>
+                    <div className="stat">
+                      <div className="stat-label">Fees</div>
+                      <div className="stat-value mono red">-{money(stats.totalFees)}</div>
+                      <div className="stat-note">
+                        {stats.grossPnL !== 0
+                          ? `${((stats.totalFees / Math.abs(stats.grossPnL)) * 100).toFixed(1)}% of gross`
+                          : 'of a flat book'}
+                      </div>
+                    </div>
+                  </>
+                )}
                 <div className="stat">
                   <div className="stat-label">Net P&L</div>
                   <div className={`stat-value mono ${stats.totalPnL >= 0 ? 'green' : 'red'}`}>
                     ${parseFloat(stats.totalPnL).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </div>
+                  {stats.hasFees && <div className="stat-note">after fees</div>}
                 </div>
                 <div className="stat">
                   <div className="stat-label">Win Rate</div>

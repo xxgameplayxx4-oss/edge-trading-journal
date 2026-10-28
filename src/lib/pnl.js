@@ -23,6 +23,25 @@ export const money = (v) =>
 
 export const signedMoney = (v) => `${v >= 0 ? '+' : '-'}${money(Math.abs(v))}`
 
+// Vest reports a gross move and charges `fee` separately, so both sides of the
+// split can be shown. Tradovate exports carry no fee breakdown at all — there
+// `pnl` is the only figure that exists, and gross falls back to it rather than
+// claiming the trade cost nothing.
+export const grossOf = (trade) =>
+  trade?.grossPnl === null || trade?.grossPnl === undefined
+    ? formatPnL(trade?.pnl)
+    : formatPnL(trade.grossPnl)
+
+export const feesOf = (trade) => {
+  const n = Number(trade?.fees)
+  return Number.isFinite(n) ? n : 0
+}
+
+// Without this guard the journal would print "Fees $0.00" for a broker that
+// simply never reported them, which reads as free trading rather than as
+// missing data.
+export const hasFeeData = (trades) => (trades || []).some((t) => feesOf(t) > 0)
+
 // The day a trade belongs to, at local midnight, or null when the stamp cannot
 // be read. Returning null rather than a guess is deliberate: a trade silently
 // filed under the wrong day is worse than one the calendar openly cannot place.

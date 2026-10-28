@@ -319,3 +319,10 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .equity-readout { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; min-height: 22px; padding-top: 4px; border-top: 1px solid var(--border); font-size: 0.8rem; }
 .equity-dim { color: var(--muted); }
 .equity-delta { color: var(--muted); font-size: 0.75rem; }
+
+/* Gross / fee disclosure. The note sits under a stat value to say which side
+   of the split it is, so "Gross P&L" and "Net P&L" are never read as rivals. */
+.stat-note { font-size: 0.7rem; color: var(--muted); margin-top: 6px; }
+/* A fee is a real number but never the point of the row, so it reads quieter
+   than the P&L beside it rather than competing with it in red. */
+.muted-cell { color: var(--muted); }
