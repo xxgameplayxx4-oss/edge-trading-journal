@@ -4,3 +4,5 @@ dist
 .env
 .env.local
 .netlify
+# Local Claude Code config (permissions, dev-server launch entries)
+.claude/
