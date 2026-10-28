@@ -1,29 +1,51 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import AgentOffice from './components/AgentOffice'
+import TradeCalendar from './components/TradeCalendar'
+import Spendings from './components/Spendings'
+import EquityCurve from './components/EquityCurve'
+import { formatPnL, money } from './lib/pnl'
+import { detectVestFormat, parseVestTrades, parseVestPayouts, payoutTotals, describeVestImport } from './lib/vest'
 
 const API_URL = '/api/journal'
 
+// Splitting on commas shifts every later column the moment one field contains
+// one — Vest's failure_reason is free text, so that is a matter of when, not if.
 function parseCSV(text) {
-  const lines = text.trim().split('\n')
-  const headers = lines[0].split(',').map(h => h.trim())
-  return lines.slice(1).map(line => {
-    const values = line.split(',').map(v => v.trim())
+  const rows = []
+  let row = []
+  let field = ''
+  let quoted = false
+  let i = 0
+
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1) // exports ship a BOM
+
+  while (i < text.length) {
+    const c = text[i]
+    if (quoted) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue }
+        quoted = false; i++; continue
+      }
+      field += c; i++; continue
+    }
+    if (c === '"') { quoted = true; i++; continue }
+    if (c === ',') { row.push(field); field = ''; i++; continue }
+    if (c === '\r') { i++; continue }
+    if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue }
+    field += c; i++
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row) }
+
+  const filled = rows.filter(r => r.some(cell => cell.trim() !== ''))
+  if (filled.length === 0) return { headers: [], records: [] }
+
+  const headers = filled[0].map(h => h.trim())
+  const records = filled.slice(1).map(r => {
     const obj = {}
-    headers.forEach((h, i) => { obj[h] = values[i] })
+    headers.forEach((h, n) => { obj[h] = (r[n] ?? '').trim() })
     return obj
   })
-}
-
-function formatPnL(pnl) {
-  if (typeof pnl === 'number') return Number.isFinite(pnl) ? pnl : 0
-  if (pnl === null || pnl === undefined) return 0
-  const raw = String(pnl).trim()
-  if (!raw) return 0
-  // Accounting style: $(45.00) means a loss, same as -45.00
-  const isNegative = raw.includes('(') || raw.startsWith('-')
-  const num = parseFloat(raw.replace(/[^0-9.]/g, ''))
-  if (!Number.isFinite(num)) return 0
-  return isNegative ? -num : num
+  return { headers, records }
 }
 
 const toNum = (v) => {
@@ -235,6 +257,66 @@ function generateEquityCurve(trades) {
   })
 }
 
+// A payout is money leaving the account, not a trade. It has a P&L-shaped
+// number on it, which is exactly why it needs saying out loud that none of
+// this reaches the win rate, the expectancy or the equity curve.
+function Payouts({ rows, onClear }) {
+  const t = payoutTotals(rows)
+  const tone = (s) =>
+    /execut|complete|paid|success/i.test(s) ? 'pnl-green' : /fail|reject|cancel/i.test(s) ? 'pnl-red' : ''
+
+  return (
+    <div className="card" style={{ marginTop: 24 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <strong>Payouts</strong>
+        <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '0.75rem' }} onClick={onClear}>Clear payouts</button>
+      </div>
+      <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: 16 }}>
+        Withdrawals, not trades — excluded from every statistic on the Analytics tab.
+      </div>
+
+      <div className="stats-grid" style={{ marginBottom: 16 }}>
+        <div className="stat">
+          <div className="stat-label">Paid out</div>
+          <div className="stat-value mono green">{money(t.paid)}</div>
+        </div>
+        <div className="stat">
+          <div className="stat-label">Processing</div>
+          <div className="stat-value mono">{money(t.pending)}</div>
+        </div>
+        <div className="stat">
+          <div className="stat-label">Your share</div>
+          <div className="stat-value mono">{money(t.toTrader)}</div>
+        </div>
+        <div className="stat">
+          <div className="stat-label">Platform fee</div>
+          <div className="stat-value mono red">{money(t.toPlatform)}</div>
+        </div>
+      </div>
+
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Requested</th><th>Yours</th><th>Platform</th><th>Status</th><th>Asked</th><th>Paid</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((p) => (
+              <tr key={p.id}>
+                <td className="mono">{money(p.requested)}</td>
+                <td className="mono">{money(p.trader)}</td>
+                <td className="mono" style={{ color: 'var(--muted)' }}>{money(p.platform)}</td>
+                <td className={`mono ${tone(p.status)}`}>{p.failureReason ? `${p.status} — ${p.failureReason}` : p.status}</td>
+                <td className="mono">{p.requestedAt.split(' ')[0]}</td>
+                <td className="mono">{p.paidAt ? p.paidAt.split(' ')[0] : '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function Toast({ message, type, onClose }) {
   return (
     <div className={`toast ${type}`} onClick={onClose}>
@@ -247,6 +329,10 @@ export default function App() {
   const [trades, setTrades] = useState([])
   const [uploads, setUploads] = useState([])
   const [plans, setPlans] = useState([])
+  // Withdrawals, kept in their own list so they can never reach calculateStats.
+  const [payouts, setPayouts] = useState([])
+  // Costs of trading rather than results of it — same reasoning, same quarantine.
+  const [spendings, setSpendings] = useState([])
   const [activeTab, setActiveTab] = useState('journal')
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
@@ -269,10 +355,27 @@ export default function App() {
   const loadData = useCallback(async () => {
     try {
       const res = await fetch(API_URL)
+      // Under a plain `vite dev` there is no function behind /api, so the SPA
+      // catch-all answers with index.html and .json() throws on the '<'. An
+      // empty journal is the honest reading of that, not an error.
+      // Dev and production part ways here on purpose: in production a non-JSON
+      // reply means the function failed and the user must hear about it, while
+      // in dev it is the normal state. Say so once instead of going silent,
+      // because `netlify dev` with a broken function lands here too and that
+      // one is worth noticing.
+      if (!(res.headers.get('content-type') || '').includes('application/json')) {
+        if (import.meta.env.DEV) {
+          console.info(`${API_URL} has no backend in this dev server — starting empty.`)
+          return
+        }
+        throw new Error(`${API_URL} did not return JSON (HTTP ${res.status})`)
+      }
       const data = await res.json()
       setTrades(data.trades || [])
       setUploads(data.uploads || [])
       setPlans(data.plans || [])
+      setPayouts(data.payouts || [])
+      setSpendings(data.spendings || [])
     } catch (e) {
       console.error('Load failed:', e)
       showToast('Failed to load data', 'error')
@@ -284,11 +387,14 @@ export default function App() {
   const saveData = useCallback(async () => {
     setIsSaving(true)
     try {
-      await fetch(API_URL, {
+      const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trades, uploads, plans })
+        body: JSON.stringify({ trades, uploads, plans, payouts, spendings })
       })
+      // A 404 from the dev server still resolves, so without this the app
+      // cheerfully reports a save that never happened.
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
       showToast('Data saved to cloud')
     } catch (e) {
       console.error('Save failed:', e)
@@ -296,16 +402,18 @@ export default function App() {
     } finally {
       setIsSaving(false)
     }
-  }, [trades, uploads])
+    // Everything in the body belongs in the deps: without that, a save fired
+    // right after an import persists the previous set.
+  }, [trades, uploads, plans, payouts, spendings])
 
   useEffect(() => { loadData() }, [loadData])
 
   useEffect(() => {
-    if (trades.length || uploads.length) {
+    if (trades.length || uploads.length || payouts.length || spendings.length) {
       const timer = setTimeout(saveData, 1000)
       return () => clearTimeout(timer)
     }
-  }, [trades, uploads, saveData])
+  }, [trades, uploads, payouts, spendings, saveData])
 
   const handleFile = async (file) => {
     if (file.type.startsWith('image/')) {
@@ -366,11 +474,48 @@ export default function App() {
     if (!/\.csv$/i.test(file.name)) { showToast('Please upload a CSV or image file', 'error'); return }
     const reader = new FileReader()
     reader.onload = (e) => {
-      const newTrades = parseCSV(e.target.result)
-      const uploadRecord = { filename: file.name, date: new Date().toISOString(), count: newTrades.length }
-      setUploads(prev => [uploadRecord, ...prev].slice(0, 50))
-      setTrades(prev => [...newTrades, ...prev])
-      showToast(`Imported ${newTrades.length} trades from ${file.name}`)
+      const { headers, records } = parseCSV(e.target.result)
+
+      if (!headers.length) { showToast(`${file.name} is empty`, 'error'); return }
+      // A header with no rows under it is a real thing to export, and reporting
+      // "imported 0 trades" for it reads like the import failed.
+      if (!records.length) {
+        showToast(`${file.name} has column headers but no rows — nothing to import`, 'error')
+        return
+      }
+
+      const note = (count, kind) => {
+        setUploads(prev => [{ filename: file.name, date: new Date().toISOString(), count, kind }, ...prev].slice(0, 50))
+      }
+
+      const vest = detectVestFormat(headers)
+
+      if (vest === 'vest-payouts') {
+        const rows = parseVestPayouts(records)
+        setPayouts(prev => {
+          const seen = new Set(prev.map(p => p.id))
+          return [...rows.filter(p => !seen.has(p.id)), ...prev].sort((a, b) => b.sortKey - a.sortKey)
+        })
+        note(rows.length, 'payouts')
+        showToast(`${rows.length} payouts from ${file.name} — withdrawals, so they stay out of your stats`)
+        return
+      }
+
+      if (vest === 'vest-trades') {
+        const result = parseVestTrades(records)
+        note(result.trades.length, 'vest')
+        if (!result.trades.length) {
+          showToast(`No closed trades in ${file.name} — ${describeVestImport(result)}`, 'error')
+          return
+        }
+        setTrades(prev => [...result.trades, ...prev])
+        showToast(`Vest: ${describeVestImport(result)}`)
+        return
+      }
+
+      note(records.length, 'trades')
+      setTrades(prev => [...records, ...prev])
+      showToast(`Imported ${records.length} trades from ${file.name}`)
     }
     reader.readAsText(file)
   }
@@ -392,9 +537,12 @@ export default function App() {
   }
 
   const clearAll = () => {
-    if (confirm('Delete all trades and uploads?')) {
+    if (confirm('Delete all trades, uploads, pending setups, payouts and spending?')) {
       setTrades([])
       setUploads([])
+      setPlans([])
+      setPayouts([])
+      setSpendings([])
       showToast('All data cleared')
     }
   }
@@ -417,7 +565,10 @@ export default function App() {
 
       <div className="tab-nav">
         <button className={`tab ${activeTab === 'journal' ? 'active' : ''}`} onClick={() => setActiveTab('journal')}>Journal</button>
+        <button className={`tab ${activeTab === 'calendar' ? 'active' : ''}`} onClick={() => setActiveTab('calendar')}>Calendar</button>
         <button className={`tab ${activeTab === 'analytics' ? 'active' : ''}`} onClick={() => setActiveTab('analytics')}>Analytics</button>
+        <button className={`tab ${activeTab === 'payouts' ? 'active' : ''}`} onClick={() => setActiveTab('payouts')}>Payouts</button>
+        <button className={`tab ${activeTab === 'spendings' ? 'active' : ''}`} onClick={() => setActiveTab('spendings')}>Spendings</button>
         <button className={`tab ${activeTab === 'office' ? 'active' : ''}`} onClick={() => setActiveTab('office')}>Agent Office</button>
         <button className={`tab ${activeTab === 'uploads' ? 'active' : ''}`} onClick={() => setActiveTab('uploads')}>Uploads</button>
       </div>
@@ -435,7 +586,7 @@ export default function App() {
             <label htmlFor="fileInput" style={{ cursor: 'pointer' }}>
               <div style={{ fontSize: '2rem', marginBottom: 8 }}>📁</div>
               <div>Drag & drop CSV or Trade Screenshots (P&L / Chart) here</div>
-              <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: 8 }}>Supports Tradovate CSV & chart images with auto SL/TP extraction</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: 8 }}>Tradovate CSV · Vest order &amp; payout CSV · chart images with auto SL/TP extraction</div>
             </label>
           </div>
 
@@ -514,7 +665,27 @@ export default function App() {
               </div>
             )}
           </div>
+
         </>
+      )}
+
+      {activeTab === 'calendar' && (
+        <TradeCalendar trades={trades} />
+      )}
+
+      {activeTab === 'payouts' && (
+        payouts.length > 0
+          ? <Payouts rows={payouts} onClear={() => setPayouts([])} />
+          : <div className="card"><div className="empty">No payouts imported. Drop a Vest payout CSV on the Journal tab.</div></div>
+      )}
+
+      {activeTab === 'spendings' && (
+        <Spendings
+          rows={spendings}
+          netPnl={stats ? stats.totalPnL : 0}
+          onAdd={(row) => setSpendings(prev => [...prev, row])}
+          onDelete={(id) => setSpendings(prev => prev.filter(r => r.id !== id))}
+        />
       )}
 
       {activeTab === 'analytics' && (
@@ -560,36 +731,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="chart-wrap">
-                <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width: '100%', height: '100%' }}>
-                  {equityData.length > 1 && (
-                    <>
-                      <defs>
-                        <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor="var(--green)" stopOpacity="0.3" />
-                          <stop offset="100%" stopColor="var(--green)" stopOpacity="0" />
-                        </linearGradient>
-                      </defs>
-                      {(() => {
-                        const minEq = Math.min(...equityData.map(d => d.equity))
-                        const maxEq = Math.max(...equityData.map(d => d.equity))
-                        const range = maxEq - minEq || 1
-                        const points = equityData.map((d, i) => {
-                          const x = (i / (equityData.length - 1)) * 100
-                          const y = 100 - ((d.equity - minEq) / range * 80 + 10)
-                          return `${x} ${y}`
-                        }).join(' ')
-                        return (
-                          <>
-                            <path d={`M${points}`} fill="url(#equityGrad)" />
-                            <path d={`M${points}`} stroke="var(--green)" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                          </>
-                        )
-                      })()}
-                    </>
-                  )}
-                </svg>
-              </div>
+              <EquityCurve data={equityData} />
             </>
           ) : (
             <div className="empty">Upload trades to see analytics</div>

@@ -251,3 +251,71 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   .log-body { height: 220px; }
 }
 .office-key { margin-top: 8px; line-height: 1.6; max-width: 88ch; }
+
+/* Trading calendar — a month of wins and losses */
+.cal-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+.cal-nav { padding: 4px 14px; font-size: 1.1rem; line-height: 1.4; }
+.cal-title { font-size: 1.1rem; min-width: 200px; }
+.cal-today { padding: 4px 12px; font-size: 0.75rem; }
+.cal-stats { margin-bottom: 20px; }
+.cal-stat-note { font-size: 0.7rem; color: var(--muted); margin-top: 6px; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
+.cal-dow-row { margin-bottom: 8px; }
+.cal-dow { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; text-align: center; padding: 4px 0; }
+.cal-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-height: 92px; padding: 10px; font: inherit; text-align: left; color: var(--text); background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 10px; cursor: pointer; transition: border-color 0.15s, transform 0.15s; }
+.cal-cell:disabled { cursor: default; background: transparent; }
+.cal-cell.cal-pad { background: transparent; border-color: transparent; min-height: 92px; cursor: default; }
+.cal-cell.cal-weekend { background: rgba(31, 41, 55, 0.25); }
+.cal-cell.cal-up { background: rgba(34, 197, 94, 0.12); border-left-color: var(--green); }
+.cal-cell.cal-down { background: rgba(239, 68, 68, 0.12); border-left-color: var(--red); }
+/* A padding cell is a div, so :not(:disabled) would match it and make an
+   empty square look clickable. Only days with trades react. */
+.cal-cell.cal-up:hover, .cal-cell.cal-down:hover { transform: translateY(-1px); border-color: var(--accent-dim); }
+.cal-cell.cal-selected { outline: 2px solid var(--accent); outline-offset: -1px; }
+.cal-cell.cal-is-today .cal-num { color: var(--accent); }
+.cal-num { font-size: 0.8rem; font-weight: 700; color: var(--muted); }
+.cal-cell.cal-up .cal-num, .cal-cell.cal-down .cal-num { color: var(--text); }
+.cal-pnl { font-size: 0.9rem; font-weight: 700; }
+.cal-count { font-size: 0.66rem; color: var(--muted); }
+.cal-none { padding: 32px; }
+.cal-undated { margin-top: 16px; padding: 12px 16px; font-size: 0.78rem; line-height: 1.6; color: var(--amber); background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 8px; }
+.cal-day-detail { margin-top: 24px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+.cal-detail-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; font-size: 0.9rem; }
+
+/* Spendings — what the trading costs outside the trades */
+.spend-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-top: 16px; }
+.spend-field { display: flex; flex-direction: column; gap: 6px; }
+.spend-field .stat-label { margin-bottom: 0; }
+.spend-grow { flex: 1; min-width: 180px; }
+.spend-amount { width: 120px; }
+.spend-field input, .spend-field select { padding: 9px 12px; font: 0.875rem 'Inter', sans-serif; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+.spend-field input:focus, .spend-field select:focus { outline: none; border-color: var(--accent); }
+.spend-error { margin-top: 12px; font-size: 0.78rem; color: var(--red); }
+.spend-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.spend-tag { padding: 3px 9px; font-size: 0.68rem; font-weight: 600; color: var(--muted); background: rgba(31, 41, 55, 0.6); border: 1px solid var(--border); border-radius: 999px; }
+.spend-breakdown { display: flex; flex-direction: column; gap: 8px; margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border); }
+.spend-bar-row { display: flex; align-items: center; gap: 12px; font-size: 0.78rem; }
+.spend-bar-name { width: 150px; flex-shrink: 0; color: var(--muted); }
+.spend-bar-track { flex: 1; height: 8px; background: rgba(31, 41, 55, 0.6); border-radius: 999px; overflow: hidden; }
+.spend-bar-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-dim), var(--accent)); border-radius: 999px; }
+.spend-bar-value { width: 90px; text-align: right; flex-shrink: 0; }
+
+@media (max-width: 720px) {
+  .cal-cell { min-height: 72px; padding: 7px; }
+  .cal-pnl { font-size: 0.72rem; }
+  .cal-count { font-size: 0.6rem; }
+  .cal-title { min-width: 0; }
+  .spend-bar-name { width: 110px; }
+}
+
+/* Equity curve — drawn against a real dollar scale that always contains $0 */
+.equity { display: flex; flex-direction: column; gap: 12px; }
+.equity-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; }
+.equity-legend { display: flex; gap: 16px; font-size: 0.75rem; color: var(--muted); }
+/* Matches the component's viewBox, so a stroke is never scaled unevenly. */
+.equity-svg { width: 100%; height: auto; aspect-ratio: 800 / 320; display: block; overflow: visible; }
+.equity-tick { font: 11px 'JetBrains Mono', monospace; fill: var(--muted); }
+.equity-tick-zero { fill: var(--text); font-weight: 600; }
+.equity-readout { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; min-height: 22px; padding-top: 4px; border-top: 1px solid var(--border); font-size: 0.8rem; }
+.equity-dim { color: var(--muted); }
+.equity-delta { color: var(--muted); font-size: 0.75rem; }
