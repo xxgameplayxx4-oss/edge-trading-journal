@@ -18,8 +18,14 @@ export function formatPnL(pnl) {
   return isNegative ? -num : num
 }
 
-export const money = (v) =>
-  `$${(v ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+export const money = (v) => {
+  const n = v ?? 0
+  // The sign is decided after rounding, so a value too small to show does
+  // not print as "-$0.00".
+  const abs = Math.round(Math.abs(n) * 100) / 100
+  const sign = n < 0 && abs > 0 ? '-' : ''
+  return `${sign}$${abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
 
 export const signedMoney = (v) => `${v >= 0 ? '+' : '-'}${money(Math.abs(v))}`
 

@@ -234,6 +234,25 @@ function normalizeExtractedTrade(raw, filename) {
   }
 }
 
+// The worst fall from a previous high -- not the lowest point the book ever
+// reached, which is what this used to report and which can be a profit. The
+// peak starts at zero so a book that is underwater from its first trade still
+// reports that fall as a drawdown rather than waiting for a high it never made.
+// The input is oldest-first to match the name; the figure itself happens to be
+// the same either way, since reversing a curve maps its peak/trough pairs onto
+// each other.
+function worstDrawdown(chronological) {
+  let peak = 0
+  let equity = 0
+  let worst = 0
+  for (const pnl of chronological) {
+    equity += pnl
+    if (equity > peak) peak = equity
+    if (equity - peak < worst) worst = equity - peak
+  }
+  return worst
+}
+
 function calculateStats(trades) {
   if (!trades.length) return null
   const pnls = trades.map(t => formatPnL(t.pnl))
@@ -244,11 +263,12 @@ function calculateStats(trades) {
   const grossPnL = trades.reduce((a, t) => a + grossOf(t), 0)
   const totalFees = trades.reduce((a, t) => a + feesOf(t), 0)
   const winRate = (wins.length / trades.length * 100).toFixed(1)
-  const avgWin = wins.length ? (wins.reduce((a, b) => a + b, 0) / wins.length).toFixed(2) : 0
-  const avgLoss = losses.length ? (losses.reduce((a, b) => a + b, 0) / losses.length).toFixed(2) : 0
+  const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0
+  const avgLoss = losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : 0
   const profitFactor = losses.length ? Math.abs(wins.reduce((a, b) => a + b, 0) / losses.reduce((a, b) => a + b, 0)).toFixed(2) : '∞'
-  const expectancy = (totalPnL / trades.length).toFixed(2)
-  const maxDrawdown = Math.min(...pnls.map((_, i) => pnls.slice(0, i+1).reduce((a, b) => a + b, 0))).toFixed(2)
+  // Kept as numbers so money() formats them rather than re-parsing a string.
+  const expectancy = totalPnL / trades.length
+  const maxDrawdown = worstDrawdown([...pnls].reverse())
   return {
     totalPnL, grossPnL, totalFees, hasFees: hasFeeData(trades),
     winRate, avgWin, avgLoss, profitFactor, expectancy, maxDrawdown,
@@ -750,7 +770,7 @@ export default function App() {
                 <div className="stat">
                   <div className="stat-label">Net P&L</div>
                   <div className={`stat-value mono ${stats.totalPnL >= 0 ? 'green' : 'red'}`}>
-                    ${parseFloat(stats.totalPnL).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    {money(stats.totalPnL)}
                   </div>
                   {stats.hasFees && <div className="stat-note">after fees</div>}
                 </div>
@@ -765,20 +785,20 @@ export default function App() {
                 <div className="stat">
                   <div className="stat-label">Expectancy</div>
                   <div className={`stat-value mono ${stats.expectancy >= 0 ? 'green' : 'red'}`}>
-                    ${parseFloat(stats.expectancy).toFixed(2)}
+                    {money(stats.expectancy)}
                   </div>
                 </div>
                 <div className="stat">
                   <div className="stat-label">Avg Win</div>
-                  <div className="stat-value mono green">${parseFloat(stats.avgWin).toFixed(2)}</div>
+                  <div className="stat-value mono green">{money(stats.avgWin)}</div>
                 </div>
                 <div className="stat">
                   <div className="stat-label">Avg Loss</div>
-                  <div className="stat-value mono red">${parseFloat(stats.avgLoss).toFixed(2)}</div>
+                  <div className="stat-value mono red">{money(stats.avgLoss)}</div>
                 </div>
                 <div className="stat">
                   <div className="stat-label">Max Drawdown</div>
-                  <div className="stat-value mono red">${parseFloat(stats.maxDrawdown).toFixed(2)}</div>
+                  <div className={`stat-value mono ${stats.maxDrawdown < 0 ? 'red' : ''}`}>{money(stats.maxDrawdown)}</div>
                 </div>
                 <div className="stat">
                   <div className="stat-label">Total Trades</div>
