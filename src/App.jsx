@@ -8,6 +8,10 @@ import { detectVestFormat, parseVestTrades, parseVestPayouts, payoutTotals, desc
 
 const API_URL = '/api/journal'
 
+// Each upload carries an identity so the rows it brought in can be taken
+// back out later without disturbing anything another file imported.
+const newUploadId = () => `up-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+
 // Splitting on commas shifts every later column the moment one field contains
 // one — Vest's failure_reason is free text, so that is a matter of when, not if.
 function parseCSV(text) {
@@ -449,12 +453,16 @@ export default function App() {
 
   useEffect(() => { loadData() }, [loadData])
 
+  // Held back until the first load resolves: the empty state this component
+  // mounts with would otherwise race the load and save nothing over the
+  // stored journal. After that every change is saved, an emptied list
+  // included -- without that last part, deleting your only spending row
+  // never reached the store and the row came back on the next reload.
   useEffect(() => {
-    if (trades.length || uploads.length || payouts.length || spendings.length) {
-      const timer = setTimeout(saveData, 1000)
-      return () => clearTimeout(timer)
-    }
-  }, [trades, uploads, payouts, spendings, saveData])
+    if (isLoading) return
+    const timer = setTimeout(saveData, 1000)
+    return () => clearTimeout(timer)
+  }, [isLoading, trades, uploads, plans, payouts, spendings, saveData])
 
   const handleFile = async (file) => {
     if (file.type.startsWith('image/')) {
@@ -480,7 +488,8 @@ export default function App() {
         if (!res.ok || !payload || payload.error) {
           throw new Error(payload?.error || `the parser returned ${res.status}`)
         }
-        setUploads(prev => [{ filename: file.name, date: new Date().toISOString(), count: 1 }, ...prev].slice(0, 50))
+        const uploadId = newUploadId()
+        setUploads(prev => [{ id: uploadId, filename: file.name, date: new Date().toISOString(), count: 1 }, ...prev].slice(0, 50))
 
         if (isChartPlan(payload)) {
           const plan = normalizeChartPlan(payload, file.name)
@@ -499,7 +508,7 @@ export default function App() {
         const planIdx = plansRef.current.findIndex(p => planMatches(trade, p))
         const row = planIdx === -1 ? trade : mergePlan(trade, plansRef.current[planIdx])
         if (planIdx !== -1) setPlans(prev => prev.filter((_, i) => i !== planIdx))
-        setTrades(prev => [row, ...prev])
+        setTrades(prev => [{ ...row, uploadId }, ...prev])
         showToast(planIdx === -1
           ? `Extracted ${row.symbol} from ${file.name}`
           : `Paired ${row.symbol} with its chart`)
@@ -525,8 +534,9 @@ export default function App() {
         return
       }
 
+      const uploadId = newUploadId()
       const note = (count, kind) => {
-        setUploads(prev => [{ filename: file.name, date: new Date().toISOString(), count, kind }, ...prev].slice(0, 50))
+        setUploads(prev => [{ id: uploadId, filename: file.name, date: new Date().toISOString(), count, kind }, ...prev].slice(0, 50))
       }
 
       const vest = detectVestFormat(headers)
@@ -535,7 +545,8 @@ export default function App() {
         const rows = parseVestPayouts(records)
         setPayouts(prev => {
           const seen = new Set(prev.map(p => p.id))
-          return [...rows.filter(p => !seen.has(p.id)), ...prev].sort((a, b) => b.sortKey - a.sortKey)
+          const fresh = rows.filter(p => !seen.has(p.id)).map(p => ({ ...p, uploadId }))
+          return [...fresh, ...prev].sort((a, b) => b.sortKey - a.sortKey)
         })
         note(rows.length, 'payouts')
         showToast(`${rows.length} payouts from ${file.name} — withdrawals, so they stay out of your stats`)
@@ -544,18 +555,32 @@ export default function App() {
 
       if (vest === 'vest-trades') {
         const result = parseVestTrades(records)
-        note(result.trades.length, 'vest')
-        if (!result.trades.length) {
-          showToast(`No closed trades in ${file.name} — ${describeVestImport(result)}`, 'error')
+        // Vest's order export and its trade export overlap: the same position
+        // arrives in both files, and a second copy of it inflates every figure
+        // on the Analytics tab. position_id is the venue own identity for a
+        // trade, so it decides what is already here. The importer index-based
+        // fallback id is not an identity -- it collides between files -- so a
+        // row carrying one is always kept rather than wrongly dropped.
+        const identity = (t) => (t.positionId && !String(t.positionId).startsWith('vest-') ? t.positionId : null)
+        const known = new Set(tradesRef.current.map(identity).filter(Boolean))
+        const fresh = result.trades.filter((t) => { const k = identity(t); return !k || !known.has(k) })
+        const already = result.trades.length - fresh.length
+        note(fresh.length, 'vest')
+        if (!fresh.length) {
+          showToast(already
+            ? `Every trade in ${file.name} is already in the journal — nothing imported`
+            : `No closed trades in ${file.name} — ${describeVestImport(result)}`, 'error')
           return
         }
-        setTrades(prev => [...result.trades, ...prev])
-        showToast(`Vest: ${describeVestImport(result)}`)
+        setTrades(prev => [...fresh.map(t => ({ ...t, uploadId })), ...prev])
+        showToast(already
+          ? `Vest: imported ${fresh.length}, skipped ${already} already in the journal`
+          : `Vest: ${describeVestImport(result)}`)
         return
       }
 
       note(records.length, 'trades')
-      setTrades(prev => [...records, ...prev])
+      setTrades(prev => [...records.map(r => ({ ...r, uploadId })), ...prev])
       showToast(`Imported ${records.length} trades from ${file.name}`)
     }
     reader.readAsText(file)
@@ -577,14 +602,40 @@ export default function App() {
     setTrades(prev => prev.filter((_, i) => i !== index))
   }
 
+  // An upload goes out together with what it brought in, so removing a file
+  // that was imported twice actually takes its rows back out of the stats.
+  // Uploads recorded before they carried an id have nothing tying rows to
+  // them: the confirm says so plainly instead of implying the stats will
+  // change.
+  const deleteUpload = (upload, index) => {
+    const ownedTrades = upload.id ? trades.filter(t => t.uploadId === upload.id).length : 0
+    const ownedPayouts = upload.id ? payouts.filter(p => p.uploadId === upload.id).length : 0
+    const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's')
+    const owned = [ownedTrades && plural(ownedTrades, 'trade'), ownedPayouts && plural(ownedPayouts, 'payout')].filter(Boolean)
+    const question = upload.id
+      ? (owned.length
+          ? `Remove ${upload.filename} and the ${owned.join(' and ')} it imported?`
+          : `Remove ${upload.filename}? Nothing in the journal came from it.`)
+      : `Remove ${upload.filename} from this list? It was imported before uploads were tracked one by one, so its rows cannot be told apart from the rest and will stay in your stats.`
+    if (!confirm(question)) return
+    if (upload.id) {
+      setTrades(prev => prev.filter(t => t.uploadId !== upload.id))
+      setPayouts(prev => prev.filter(p => p.uploadId !== upload.id))
+    }
+    setUploads(prev => prev.filter((_, i) => i !== index))
+    showToast(owned.length ? `Removed ${upload.filename} and its ${owned.join(' and ')}` : `Removed ${upload.filename}`)
+  }
+
+  // Spending is typed in by hand and cannot be re-imported from anywhere, so
+  // it is not swept up with the things a CSV can put back. It goes one row at
+  // a time on its own tab, and nothing else removes it.
   const clearAll = () => {
-    if (confirm('Delete all trades, uploads, pending setups, payouts and spending?')) {
+    if (confirm('Delete all trades, uploads, pending setups and payouts?\n\nYour spending records are kept — delete those on the Spendings tab.')) {
       setTrades([])
       setUploads([])
       setPlans([])
       setPayouts([])
-      setSpendings([])
-      showToast('All data cleared')
+      showToast('Cleared — spending records kept')
     }
   }
 
@@ -822,14 +873,15 @@ export default function App() {
             <div className="table-wrap">
               <table>
                 <thead>
-                  <tr><th>Filename</th><th>Date</th><th>Trades</th></tr>
+                  <tr><th>Filename</th><th>Date</th><th>Rows</th><th></th></tr>
                 </thead>
                 <tbody>
                   {uploads.map((u, i) => (
-                    <tr key={i}>
+                    <tr key={u.id || i}>
                       <td>{u.filename}</td>
                       <td className="mono">{new Date(u.date).toLocaleString()}</td>
                       <td className="mono">{u.count}</td>
+                      <td><button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '0.75rem' }} onClick={() => deleteUpload(u, i)}>Delete</button></td>
                     </tr>
                   ))}
                 </tbody>
