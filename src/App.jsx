@@ -291,8 +291,18 @@ function generateEquityCurve(trades) {
 // A payout is money leaving the account, not a trade. It has a P&L-shaped
 // number on it, which is exactly why it needs saying out loud that none of
 // this reaches the win rate, the expectancy or the equity curve.
-function Payouts({ rows, onClear }) {
+function Payouts({ rows, banked, onToggle, onClear }) {
   const t = payoutTotals(rows)
+  const inBank = new Set(banked)
+  // Anything not ticked is money that has not reached the bank. A failed
+  // payout is not on its way, so it is not waiting on anything.
+  const waiting = rows.filter((r) => !inBank.has(r.id) && !/fail|reject|cancel/i.test(r.status))
+  const notInBank = waiting.reduce((s, r) => s + r.trader, 0)
+  // A payout takes a day or more to land, so only the ones sent longer ago
+  // than that are worth chasing.
+  const overdue = waiting
+    .filter((r) => r.paidAt && Date.now() - r.sortKey > 86400000)
+    .reduce((s, r) => s + r.trader, 0)
   // The split is not a constant: these exports carry 95/5 rows alongside 80/20
   // ones, so a single blended percentage would misdescribe every row it covers.
   // Only state one rate when every payout actually shares it.
@@ -337,16 +347,29 @@ function Payouts({ rows, onClear }) {
             </div>
           )}
         </div>
+        <div className="stat">
+          <div className="stat-label">Not in bank</div>
+          <div className="stat-value mono amber">{money(notInBank)}</div>
+          {overdue > 0 && <div className="stat-note">{money(overdue)} sent over 24h ago</div>}
+        </div>
       </div>
 
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>Requested</th><th>Yours</th><th>Platform</th><th>Status</th><th>Asked</th><th>Paid</th></tr>
+            <tr><th>In bank</th><th>Requested</th><th>Yours</th><th>Platform</th><th>Status</th><th>Asked</th><th>Paid</th></tr>
           </thead>
           <tbody>
             {rows.map((p) => (
               <tr key={p.id}>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={inBank.has(p.id)}
+                    onChange={() => onToggle(p.id)}
+                    title="Tick once this one has landed in your bank"
+                  />
+                </td>
                 <td className="mono">{money(p.requested)}</td>
                 <td className="mono">{money(p.trader)}</td>
                 <td className="mono" style={{ color: 'var(--muted)' }}>{money(p.platform)}</td>
@@ -378,6 +401,9 @@ export default function App() {
   const [payouts, setPayouts] = useState([])
   // Costs of trading rather than results of it — same reasoning, same quarantine.
   const [spendings, setSpendings] = useState([])
+  // Ids of the payouts you have seen land. The platform only knows it sent
+  // the money; whether it arrived is yours to say.
+  const [banked, setBanked] = useState([])
   const [activeTab, setActiveTab] = useState('journal')
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
@@ -421,6 +447,7 @@ export default function App() {
       setPlans(data.plans || [])
       setPayouts(data.payouts || [])
       setSpendings(data.spendings || [])
+      setBanked(data.banked || [])
     } catch (e) {
       console.error('Load failed:', e)
       showToast('Failed to load data', 'error')
@@ -435,7 +462,7 @@ export default function App() {
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trades, uploads, plans, payouts, spendings })
+        body: JSON.stringify({ trades, uploads, plans, payouts, spendings, banked })
       })
       // A 404 from the dev server still resolves, so without this the app
       // cheerfully reports a save that never happened.
@@ -449,7 +476,7 @@ export default function App() {
     }
     // Everything in the body belongs in the deps: without that, a save fired
     // right after an import persists the previous set.
-  }, [trades, uploads, plans, payouts, spendings])
+  }, [trades, uploads, plans, payouts, spendings, banked])
 
   useEffect(() => { loadData() }, [loadData])
 
@@ -462,7 +489,7 @@ export default function App() {
     if (isLoading) return
     const timer = setTimeout(saveData, 1000)
     return () => clearTimeout(timer)
-  }, [isLoading, trades, uploads, plans, payouts, spendings, saveData])
+  }, [isLoading, trades, uploads, plans, payouts, spendings, banked, saveData])
 
   const handleFile = async (file) => {
     if (file.type.startsWith('image/')) {
@@ -780,7 +807,12 @@ export default function App() {
 
       {activeTab === 'payouts' && (
         payouts.length > 0
-          ? <Payouts rows={payouts} onClear={() => setPayouts([])} />
+          ? <Payouts
+              rows={payouts}
+              banked={banked}
+              onToggle={(id) => setBanked(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
+              onClear={() => setPayouts([])}
+            />
           : <div className="card"><div className="empty">No payouts imported. Drop a Vest payout CSV on the Journal tab.</div></div>
       )}
 
